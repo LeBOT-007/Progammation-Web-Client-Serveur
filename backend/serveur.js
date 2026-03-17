@@ -1,3 +1,4 @@
+const bcrypt = require('bcrypt');
 const express = require('express');
 const cors = require('cors');
 const db = require('./db'); // Importation de ta connexion Railway
@@ -14,40 +15,55 @@ app.get('/', (req, res) => {
     res.send("🚀 Serveur de santé opérationnel !");
 });
 
-// --- 2. INSCRIPTION (Table: users) ---
-app.post('/inscription', async (req, res) => {
-    const { nom, email, password, role, specialite } = req.body;
-
-    if (!nom || !email || !password || !role) {
-        return res.status(400).json({ error: "Champs obligatoires manquants." });
-    }
-
-    try {
-        const sql = "INSERT INTO users (nom, email, password, role, specialite) VALUES (?, ?, ?, ?, ?)";
-        const [result] = await db.query(sql, [nom, email, password, role, specialite || null]);
-        res.status(201).json({ message: "Utilisateur créé !", userId: result.insertId });
-    } catch (err) {
-        if (err.code === 'ER_DUP_ENTRY') return res.status(400).json({ error: "Email déjà utilisé." });
-        res.status(500).json({ error: err.message });
-    }
-});
-
-// --- 3. CONNEXION (Table: users) ---
+// Route pour la connexion
 app.post('/login', async (req, res) => {
     const { email, password } = req.body;
 
     try {
+        
         const [rows] = await db.query("SELECT * FROM users WHERE email = ?", [email]);
-        if (rows.length === 0 || rows[0].password !== password) {
-            return res.status(401).json({ error: "Identifiants incorrects." });
+        
+        if (rows.length === 0) {
+            return res.status(401).json({ error: "Utilisateur non trouvé." });
         }
-        res.json({ message: "Bienvenue !", user: { id: rows[0].id, nom: rows[0].nom, role: rows[0].role } });
+
+        const user = rows[0];
+
+        
+        const match = await bcrypt.compare(password, user.password);
+
+        if (!match) {
+            return res.status(401).json({ error: "Mot de passe incorrect." });
+        }
+
+        
+        res.json({ 
+            message: "Connexion réussie ! 🔓", 
+            user: { id: user.id, nom: user.nom, role: user.role } 
+        });
+
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
-// --- 4. VOIR LES DISPOS (Table: availabilities) ---
+// Route pour l'inscription
+app.post('/inscription', async (req, res) => {
+    const { nom, email, password, role, specialite } = req.body;
+    try {
+        // On "hache" le mot de passe (10 est le niveau de sécurité)
+        const hashedPassword = await bcrypt.hash(password, 10);
+        
+        const sql = "INSERT INTO users (nom, email, password, role, specialite) VALUES (?, ?, ?, ?, ?)";
+        await db.query(sql, [nom, email, hashedPassword, role, specialite || null]);
+        
+        res.status(201).json({ message: "Utilisateur créé en toute sécurité ! 🔐" });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Route pour voir les disponibilités
 app.get('/disponibilites', async (req, res) => {
     try {
         const sql = `
@@ -63,7 +79,7 @@ app.get('/disponibilites', async (req, res) => {
     }
 });
 
-// --- 5. RÉSERVER UN RDV (Table: appointments) ---
+// Route pour réserver un rendez-vous
 app.post('/reserver', async (req, res) => {
     const { patient_id, doctor_id, date_heure } = req.body;
 
@@ -86,7 +102,7 @@ app.post('/reserver', async (req, res) => {
     }
 });
 
-// --- 6. VOIR MES RDV (Table: appointments) ---
+// Route pour voir les rendez-vous d'un patient
 app.get('/mes-rendez-vous/:patient_id', async (req, res) => {
     const patientId = req.params.patient_id;
     try {
@@ -98,6 +114,57 @@ app.get('/mes-rendez-vous/:patient_id', async (req, res) => {
         `;
         const [rows] = await db.query(sql, [patientId]);
         res.json(rows);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Route pour ANNULER un rendez-vous
+app.delete('/annuler-rdv/:id', async (req, res) => {
+    const rdvId = req.params.id;
+
+    try {
+        // 1. On récupère les infos du RDV avant de le supprimer pour savoir quel créneau libérer
+        const [rdv] = await db.query("SELECT doctor_id, date_heure FROM appointments WHERE id = ?", [rdvId]);
+
+        if (rdv.length === 0) {
+            return res.status(404).json({ error: "Rendez-vous non trouvé." });
+        }
+
+        const { doctor_id, date_heure } = rdv[0];
+
+        // 2. On supprime le rendez-vous
+        await db.query("DELETE FROM appointments WHERE id = ?", [rdvId]);
+
+        // 3. On remet le créneau du docteur en 'libre'
+        await db.query(
+            "UPDATE availabilities SET statut = 'libre' WHERE doctor_id = ? AND date_heure = ?",
+            [doctor_id, date_heure]
+        );
+
+        res.json({ message: "Rendez-vous annulé et créneau libéré ! 🗑️" });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Route pour récupérer la liste de tous les soignants
+app.get('/medecins', async (req, res) => {
+    try {
+        const [rows] = await db.query(
+            "SELECT id, nom, specialite FROM users WHERE role = 'soignant'"
+        );
+        res.json(rows);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/profil/:id', async (req, res) => {
+    try {
+        const [rows] = await db.query("SELECT id, nom, email, role, specialite FROM users WHERE id = ?", [req.params.id]);
+        if (rows.length === 0) return res.status(404).json({ error: "Profil introuvable." });
+        res.json(rows[0]);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
